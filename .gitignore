@@ -1,0 +1,7 @@
+.env
+pdfs
+output
+output_BKP
+.venv
+.gradio
+chroma_db
