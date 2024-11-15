@@ -1,3 +1,5 @@
+# minerU
+
 import os
 
 from magic_pdf.data.data_reader_writer import FileBasedDataWriter, FileBasedDataReader

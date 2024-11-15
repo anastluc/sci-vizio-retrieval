@@ -34,7 +34,7 @@ class ImageProcessorRetry:
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler('image_processing_retry.log'),
+                logging.FileHandler('logs/image_processing_retry.log'),
                 logging.StreamHandler()
             ]
         )
@@ -81,9 +81,9 @@ class ImageProcessorRetry:
             cur.execute('''
                 SELECT id, pdf_file, image_path 
                 FROM image_processing 
-                WHERE success_status = 0
+                WHERE response_status_code = 429
                 ORDER BY id ASC 
-                LIMIT 1200, 200
+                
             ''')
             
             return [dict(row) for row in cur.fetchall()]

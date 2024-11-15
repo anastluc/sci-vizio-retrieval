@@ -33,7 +33,7 @@ class ImageProcessor:
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler('image_processing.log'),
+                logging.FileHandler('logs/image_processing.log'),
                 logging.StreamHandler()
             ]
         )

@@ -25,7 +25,7 @@ class ImageAnalysisIndexer:
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler('json_indexing.log'),
+                logging.FileHandler('logs/json_indexing.log'),
                 logging.StreamHandler()
             ]
         )
