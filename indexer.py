@@ -9,6 +9,9 @@ from typing import Dict, Optional, Tuple
 import time
 from pathlib import Path
 import base64
+from chromadb.utils.embedding_functions import OpenCLIPEmbeddingFunction
+import numpy as np
+from PIL import Image
 
 class ImageAnalysisIndexer:
     def __init__(self, db_path: str = "pdf_processing.db"):
@@ -31,12 +34,10 @@ class ImageAnalysisIndexer:
         )
         self.logger = logging.getLogger(__name__)
         
-        # Initialize ChromaDB with default embedding function
-        print("11")
+        # chroma settings
         self.chroma_client = chromadb.PersistentClient(path="./chroma_db")
-        print("12")
-        self.default_ef = embedding_functions.DefaultEmbeddingFunction()
-        print("13")
+        self.embedding_function = embedding_functions.OpenCLIPEmbeddingFunction()
+
         
         # Initialize database
         self._init_database()
@@ -67,14 +68,28 @@ class ImageAnalysisIndexer:
         """Initialize or get ChromaDB collection."""
         try:
             # First try to get the collection
-            self.collection = self.chroma_client.create_collection(
-                name="image_analysis",
-                metadata={"description": "Image analysis results with image embeddings"}
+            self.image_collection = self.chroma_client.create_collection(
+                name="image_analysis_image_embeddings",
+                metadata={"description": "Image analysis results with image embeddings"},
+                embedding_function = self.embedding_function
+
             )
-            self.logger.info("Created new collection: image_analysis")
+            self.logger.info("Created new collection: image_analysis_image_embeddings")
         except Exception as e:
+            print(e)
             self.logger.info("Collection exists, getting existing collection")
-            self.collection = self.chroma_client.get_collection(name="image_analysis")
+            self.image_collection = self.chroma_client.get_collection(name="image_analysis_image_embeddings", embedding_function=self.embedding_function)
+        
+        try:
+            self.doc_collection = self.chroma_client.create_collection(
+                name="image_analysis_description_documents",
+                metadata={"description": "Image analysis results with vision analysis documents"},
+            )
+            self.logger.info("Created new collection: image_analysis_description_documents")
+        except Exception as e:
+            self.logger.info("Collection exists, getting existing collection")            
+            self.doc_collection = self.chroma_client.get_collection(name="image_analysis_description_documents")
+
 
     def extract_and_validate_json(self, response_text: str) -> Tuple[bool, Optional[Dict], Optional[str]]:
         """Extract and validate JSON from response text."""
@@ -148,7 +163,7 @@ class ImageAnalysisIndexer:
             json_str = json.dumps(json_obj)
             
             # Create document for indexing with both text and image
-            self.collection.add(
+            self.doc_collection.add(
                 documents=[json_str],
                 metadatas=[{
                     "pdf_file": pdf_file,
@@ -157,6 +172,20 @@ class ImageAnalysisIndexer:
                     "title": json_obj.get("title", ""),
                     "image_data": image_b64  # Store base64 image in metadata
                 }],
+                ids=[document_id]
+            )
+
+            img = Image.open(image_path)
+            img_array = np.array(img)
+            
+            self.image_collection.add(
+                metadatas=[{
+                    "pdf_file": pdf_file,
+                    "image": image_path,
+                    "image_path": image_path
+                    
+                }],
+                images = [img_array],
                 ids=[document_id]
             )
             

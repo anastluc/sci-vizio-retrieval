@@ -12,7 +12,7 @@ class ChromaDBQuerier:
     def __init__(self, chroma_path="./chroma_db"):
         """Initialize ChromaDB connection."""
         self.client = chromadb.PersistentClient(path=chroma_path)
-        self.collection = self.client.get_collection(name="image_analysis")
+        self.collection = self.client.get_collection(name="image_analysis_description_documents")
         
     def query_database(self, query_text: str, n_results: int = 5):
         """
