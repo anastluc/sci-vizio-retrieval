@@ -10,10 +10,16 @@ import json
 import logging
 import time
 from typing import Dict, Optional
+from dotenv import load_dotenv
+import torch
+from torchvision import transforms
+from torchvision.models import resnet50, ResNet50_Weights
+import numpy as np
 
 class ImageProcessor:
-    GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-    GROQ_API_KEY = "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"
+    load_dotenv()
+    GROQ_API_URL = os.getenv("GROQ_API_URL")
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     
     def __init__(self, images_dir: str, output_dir: str, db_path: str = "pdf_processing.db"):
         """
@@ -24,9 +30,30 @@ class ImageProcessor:
             output_dir (str): Directory to store processing results
             db_path (str): Path to SQLite database
         """
+        load_dotenv()
+        GROQ_API_URL = os.getenv("GROQ_API_URL")
+        GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+        print(GROQ_API_KEY)
+        self.GROQ_API_URL = GROQ_API_URL
+        self.GROQ_API_KEY = GROQ_API_KEY
+
         self.images_dir = Path(images_dir)
         self.output_dir = Path(output_dir)
         self.db_path = db_path
+
+        # Initialize image model
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = resnet50(weights=ResNet50_Weights.DEFAULT)
+        self.model = torch.nn.Sequential(*(list(self.model.children())[:-1]))
+        self.model.to(self.device)
+        self.model.eval()
+        
+        self.transform = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
         
         # Setup logging
         logging.basicConfig(
@@ -60,11 +87,28 @@ class ImageProcessor:
                     success_status BOOLEAN,
                     response_status_code INTEGER,
                     response TEXT,
-                    error_message TEXT
+                    error_message TEXT,
+                    embedding BLOB
                 )
             ''')
             
             conn.commit()
+
+    def get_image_embedding(self, image_path: str) -> Optional[np.ndarray]:
+        """Generate embedding for an image."""
+        try:
+            image = Image.open(image_path).convert('RGB')
+            image_tensor = self.transform(image).unsqueeze(0).to(self.device)
+            
+            with torch.no_grad():
+                embedding = self.model(image_tensor)
+                embedding = embedding.squeeze().cpu().numpy()
+                
+            return embedding / np.linalg.norm(embedding)
+            
+        except Exception as e:
+            self.logger.error(f"Error generating embedding for {image_path}: {str(e)}")
+            return None
 
     def process_image(self, image_path: Path, pdf_file: str) -> Dict:
         """
@@ -85,10 +129,16 @@ class ImageProcessor:
             'success_status': False,
             'response_status_code': None,
             'response': None,
-            'error_message': None
+            'error_message': None,
+            'embedding': None
         }
         
         try:
+            # Generate embedding
+            embedding = self.get_image_embedding(image_path)
+            if embedding is not None:
+                result['embedding'] = embedding.tolist()
+
             # Read and encode image
             with open(image_path, 'rb') as img:
                 image_bytes = img.read()
@@ -161,8 +211,8 @@ class ImageProcessor:
             cur = conn.cursor()
             cur.execute('''
                 INSERT INTO image_processing 
-                (pdf_file, timestamp, image, image_path, success_status, response_status_code, response, error_message)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (pdf_file, timestamp, image, image_path, success_status, response_status_code, response, error_message, embedding)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 result['pdf_file'],
                 result['timestamp'],
@@ -171,7 +221,8 @@ class ImageProcessor:
                 result['success_status'],
                 result['response_status_code'],
                 result['response'],
-                result['error_message']
+                result['error_message'],
+                result['embedding']
             ))
             conn.commit()
 

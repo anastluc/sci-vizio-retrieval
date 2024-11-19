@@ -12,11 +12,14 @@ import time
 from typing import Dict, Optional, List
 from dotenv import load_dotenv
 import os
+import torch
+from chromadb.utils.embedding_functions import OpenCLIPEmbeddingFunction
+import numpy as np
+import chromadb
+from chromadb.utils import embedding_functions
+from tqdm import tqdm
 
 class ImageProcessorRetry:
-    load_dotenv()
-    GROQ_API_URL = os.getenv("GROQ_API_URL")
-    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     
     def __init__(self,  images_dir: str, output_dir: str, db_path: str = "pdf_processing.db"):
         """
@@ -25,10 +28,36 @@ class ImageProcessorRetry:
         Args:
             db_path (str): Path to SQLite database
         """
+        load_dotenv()
+        GROQ_API_URL = os.getenv("GROQ_API_URL")
+        GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+        # print(GROQ_API_KEY)
+        self.GROQ_API_URL = GROQ_API_URL
+        self.GROQ_API_KEY = GROQ_API_KEY
+
         self.images_dir = Path(images_dir)
         self.output_dir = Path(output_dir)
         self.db_path = db_path
+
+                # Initialize image model
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # self.model = resnet50(weights=ResNet50_Weights.DEFAULT)
+        # self.model = torch.nn.Sequential(*(list(self.model.children())[:-1]))
+        # self.model.to(self.device)
+        # self.model.eval()
         
+        # self.transform = transforms.Compose([
+        #     transforms.Resize(256),
+        #     transforms.CenterCrop(224),
+        #     transforms.ToTensor(),
+        #     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        # ])
+        
+        # chroma settings
+        self.chroma_client = chromadb.PersistentClient(path="./chroma_db")
+        self.embedding_function = embedding_functions.OpenCLIPEmbeddingFunction()
+
+
         # Setup logging
         logging.basicConfig(
             level=logging.INFO,
@@ -40,32 +69,39 @@ class ImageProcessorRetry:
         )
         self.logger = logging.getLogger(__name__)
 
-         # Initialize database
-        self._init_database()
 
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def _init_database(self):
-        """Initialize SQLite database with image processing table."""
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.cursor()
-            
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS image_processing (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    pdf_file TEXT,
-                    timestamp TEXT,
-                    image TEXT,
-                    image_path TEXT,
-                    success_status BOOLEAN,
-                    response_status_code INTEGER,
-                    response TEXT,
-                    error_message TEXT
-                )
-            ''')
-            
-            conn.commit()
+        # Initialize or get collection
+        self._init_collection()
+
+    def _init_collection(self):
+        """Initialize or get ChromaDB collection."""
+        try:
+            # First try to get the collection
+            self.image_collection = self.chroma_client.create_collection(
+                name="image_analysis_image_embeddings",
+                metadata={"description": "Image analysis results with image embeddings"},
+                embedding_function = self.embedding_function
+
+            )
+            self.logger.info("Created new collection: image_analysis_image_embeddings")
+        except Exception as e:
+            print(e)
+            self.logger.info("Collection exists, getting existing collection")
+            self.image_collection = self.chroma_client.get_collection(name="image_analysis_image_embeddings", embedding_function=self.embedding_function)
+        
+        try:
+            self.doc_collection = self.chroma_client.create_collection(
+                name="image_analysis_description_documents",
+                metadata={"description": "Image analysis results with vision analysis documents"},
+            )
+            self.logger.info("Created new collection: image_analysis_description_documents")
+        except Exception as e:
+            self.logger.info("Collection exists, getting existing collection")            
+            self.doc_collection = self.chroma_client.get_collection(name="image_analysis_description_documents")
+
 
     def get_failed_entries(self) -> List[Dict]:
         """
@@ -82,13 +118,46 @@ class ImageProcessorRetry:
                 SELECT id, pdf_file, image_path 
                 FROM image_processing 
                 WHERE response_status_code = 429
-                ORDER BY id ASC 
-                
+                ORDER BY id ASC                 
             ''')
             
             return [dict(row) for row in cur.fetchall()]
 
-    def process_image(self, image_path: str) -> Dict:
+    def store_in_chroma(self, result: Dict, doc_id: str):
+        """Store document and embedding in ChromaDB."""
+
+        self.doc_collection.add(
+            # embeddings=[result['embedding']],  # List of floats for ChromaDB
+            documents=[result['response']],
+            metadatas=[{
+                "pdf_file": result['pdf_file'],
+                "image": result['image'],
+                "image_path": result['image_path'],
+                
+            }],
+            ids=[str(doc_id)]
+        )
+
+        self.image_collection.add(
+            metadatas=[{
+                "pdf_file": result['pdf_file'],
+                "image": result['image'],
+                "image_path": result['image_path'],
+                
+            }],
+            images = [result.get('image_data')],
+            ids=[str(doc_id)]
+        )
+
+    def get_image_embedding(self, image_path):
+        
+        img = Image.open(image_path)
+        img_array = np.array(img)
+        
+        emb = self.embedding_function(img_array)
+        return emb
+
+    def process_image(self, image_path: str,pdf_file: str) -> Dict:
         """
         Process a single image using the Groq API.
         
@@ -99,15 +168,31 @@ class ImageProcessorRetry:
             dict: Processing results
         """
         result = {
+            'pdf_file': pdf_file,
+            'timestamp': datetime.now().isoformat(),
+            'image': image_path,
+            'image_path': str(image_path),
             'success_status': False,
+            'response_status_code': None,
             'response': None,
-            'error_message': None
+            'error_message': None,
+            'embedding': None
         }
         
         try:
             image_path = Path(image_path)
             if not image_path.exists():
                 raise FileNotFoundError(f"Image file not found: {image_path}")
+            
+            # Generate embedding
+            # print(image_path)
+            # embedding = self.get_image_embedding(image_path)
+            embedding = None # do not calculate embedding
+            # print("\n\n---------\n- EMBEDDING -\n---------")
+            # print(embedding)
+            # print("---------")
+            
+                
 
             # Read and encode image
             with open(image_path, 'rb') as img:
@@ -133,13 +218,18 @@ class ImageProcessorRetry:
             response = self.make_api_request("llama-3.2-90b-vision-preview", messages)
 
             result["response_status_code"] = response.status_code
+            # print(response.text)
 
             if response.status_code == 200:
                 content = response.json()["choices"][0]["message"]["content"]
                 result['success_status'] = True
                 result['response'] = content
+
+            if embedding is not None:
+                result['embedding'] = embedding#.tolist()
+                # print(result['embedding'])
                 
-                
+            
             else:
                 result['error_message'] = f"API request failed with status {response.status_code}"
                 
@@ -175,7 +265,8 @@ class ImageProcessorRetry:
                     response = ?,
                     error_message = ?,
                     timestamp = ?,
-                    response_status_code = ?
+                    response_status_code = ?,
+                    embedding = ?
                 WHERE id = ?
             ''', (
                 result['success_status'],
@@ -183,6 +274,7 @@ class ImageProcessorRetry:
                 result['error_message'],
                 datetime.now().isoformat(),
                 result['response_status_code'],
+                json.dumps(result['embedding']),
                 entry_id
             ))
             conn.commit()
@@ -207,11 +299,17 @@ class ImageProcessorRetry:
         
         self.logger.info(f"Found {stats['total_entries']} failed entries to retry")
         
-        for idx, entry in enumerate(failed_entries, 1):
+        for idx, entry in tqdm(enumerate(failed_entries, 1)):
             self.logger.info(f"Processing [{idx}/{stats['total_entries']}] {entry['image_path']}")
+
+            image_file_size = os.path.getsize(entry['image_path'])
+            if image_file_size > 4 * 1024 * 1024:
+                print(f"Image {entry['image_path']} is {image_file_size} - larger than 4 Mb")
+                continue
             
             try:
-                result = self.process_image(entry['image_path'])
+                result = self.process_image(entry['image_path'],entry['pdf_file'])
+                # self.store_in_chroma(result, entry['id'])
                 self.update_entry(entry['id'], result)
                 
                 if result['success_status']:
@@ -222,7 +320,7 @@ class ImageProcessorRetry:
                     self.logger.error(f"Failed to process {entry['image_path']}: {result['error_message']}")
                 
                 # Add delay to avoid API rate limits
-                time.sleep(5)
+                time.sleep(10)
                 
             except Exception as e:
                 stats['failed'] += 1
@@ -253,7 +351,6 @@ def main():
     
     print(f"\nProcessing images from: {images_dir}")
     print(f"Saving analysis to: {output_dir}")
-
 
     try:
         # Initialize processor and process failed entries
