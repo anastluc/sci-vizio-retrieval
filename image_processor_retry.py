@@ -9,54 +9,45 @@ from datetime import datetime
 import json
 import logging
 import time
-from typing import Dict, Optional, List
+from typing import Dict, Literal, Optional, List
 from dotenv import load_dotenv
 import os
 import torch
-from chromadb.utils.embedding_functions import OpenCLIPEmbeddingFunction
+# from chromadb.utils.embedding_functions import OpenCLIPEmbeddingFunction
 import numpy as np
-import chromadb
-from chromadb.utils import embedding_functions
+# import chromadb
+# from chromadb.utils import embedding_functions
 from tqdm import tqdm
+from vision_models.vision_API import VisionAPI
+from vision_models.claude_vision import ClaudeVision
+from vision_models.gemini_vision import GeminiVision
+from vision_models.groq_vision import GroqVision
+from vision_models.openai_vision import OpenAIVision
+from vision_models.xai_vision import XAI_Vision
+
+MLLM_Provider = Literal[
+    "openai",
+    "anthropic", 
+    "google", 
+    "groq-vision",
+    "xai"]
 
 class ImageProcessorRetry:
     
-    def __init__(self,  images_dir: str, output_dir: str, db_path: str = "pdf_processing.db"):
+    def __init__(self,  model:str , images_dir: str, output_dir: str, db_path: str = "pdf_processing.db"):
         """
         Initialize the image processor for retrying failed entries.
         
         Args:
             db_path (str): Path to SQLite database
         """
-        load_dotenv()
-        GROQ_API_URL = os.getenv("GROQ_API_URL")
-        GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-        # print(GROQ_API_KEY)
-        self.GROQ_API_URL = GROQ_API_URL
-        self.GROQ_API_KEY = GROQ_API_KEY
+        self.vision_api: VisionAPI = self.create_vision_api(model)
 
         self.images_dir = Path(images_dir)
         self.output_dir = Path(output_dir)
-        self.db_path = db_path
-
-                # Initialize image model
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # self.model = resnet50(weights=ResNet50_Weights.DEFAULT)
-        # self.model = torch.nn.Sequential(*(list(self.model.children())[:-1]))
-        # self.model.to(self.device)
-        # self.model.eval()
+        self.db_path = db_path       
         
-        # self.transform = transforms.Compose([
-        #     transforms.Resize(256),
-        #     transforms.CenterCrop(224),
-        #     transforms.ToTensor(),
-        #     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        # ])
         
-        # chroma settings
-        self.chroma_client = chromadb.PersistentClient(path="./chroma_db")
-        self.embedding_function = embedding_functions.OpenCLIPEmbeddingFunction()
-
 
         # Setup logging
         logging.basicConfig(
@@ -73,36 +64,20 @@ class ImageProcessorRetry:
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Initialize or get collection
-        self._init_collection()
-
-    def _init_collection(self):
-        """Initialize or get ChromaDB collection."""
-        try:
-            # First try to get the collection
-            self.image_collection = self.chroma_client.create_collection(
-                name="image_analysis_image_embeddings",
-                metadata={"description": "Image analysis results with image embeddings"},
-                embedding_function = self.embedding_function
-
-            )
-            self.logger.info("Created new collection: image_analysis_image_embeddings")
-        except Exception as e:
-            print(e)
-            self.logger.info("Collection exists, getting existing collection")
-            self.image_collection = self.chroma_client.get_collection(name="image_analysis_image_embeddings", embedding_function=self.embedding_function)
+    def create_vision_api(self,specific_model:str) -> VisionAPI:
+        if specific_model == "openai":
+            return OpenAIVision(specific_model)
+        elif specific_model == "anthropic":
+            return ClaudeVision(specific_model)
+        elif specific_model in ["gemini-2.0-flash-exp"]:
+            return GeminiVision(specific_model)
+        elif specific_model == "groq-vision":
+            return GroqVision(specific_model)
+        elif specific_model == "xai":
+            return XAI_Vision(specific_model)
+        else:
+            raise ValueError(f"Unsupported provider: {specific_model}")
         
-        try:
-            self.doc_collection = self.chroma_client.create_collection(
-                name="image_analysis_description_documents",
-                metadata={"description": "Image analysis results with vision analysis documents"},
-            )
-            self.logger.info("Created new collection: image_analysis_description_documents")
-        except Exception as e:
-            self.logger.info("Collection exists, getting existing collection")            
-            self.doc_collection = self.chroma_client.get_collection(name="image_analysis_description_documents")
-
-
     def get_failed_entries(self) -> List[Dict]:
         """
         Get all entries with success_status = 0 from the database.
@@ -118,36 +93,11 @@ class ImageProcessorRetry:
                 SELECT id, pdf_file, image_path 
                 FROM image_processing 
                 WHERE response_status_code = 429
-                ORDER BY id ASC                 
+                ORDER BY id ASC                
             ''')
             
             return [dict(row) for row in cur.fetchall()]
 
-    def store_in_chroma(self, result: Dict, doc_id: str):
-        """Store document and embedding in ChromaDB."""
-
-        self.doc_collection.add(
-            # embeddings=[result['embedding']],  # List of floats for ChromaDB
-            documents=[result['response']],
-            metadatas=[{
-                "pdf_file": result['pdf_file'],
-                "image": result['image'],
-                "image_path": result['image_path'],
-                
-            }],
-            ids=[str(doc_id)]
-        )
-
-        self.image_collection.add(
-            metadatas=[{
-                "pdf_file": result['pdf_file'],
-                "image": result['image'],
-                "image_path": result['image_path'],
-                
-            }],
-            images = [result.get('image_data')],
-            ids=[str(doc_id)]
-        )
 
     def get_image_embedding(self, image_path):
         
@@ -203,22 +153,14 @@ class ImageProcessorRetry:
                 img = Image.open(io.BytesIO(image_bytes))
                 img.verify()
 
-            # Prepare API request
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}},
-                        {"type": "text", "text": self.USER_PROMPT}            
-                    ]
-                }
-            ]
+            try:
+                response = self.vision_api.analyze_image(image_path, self.USER_PROMPT)
+            except Exception as e:
+                print(f"Failed to get response: {str(e)}")
 
-            # Make API request
-            response = self.make_api_request("llama-3.2-90b-vision-preview", messages)
 
-            result["response_status_code"] = response.status_code
-            # print(response.text)
+            # result["response_status_code"] = response.status_code
+            print(response.text)
 
             if response.status_code == 200:
                 content = response.json()["choices"][0]["message"]["content"]
@@ -238,22 +180,6 @@ class ImageProcessorRetry:
             self.logger.error(f"Error processing {image_path}: {str(e)}")
         
         return result
-
-    def make_api_request(self, model: str, messages: list) -> requests.Response:
-        """Make request to Groq API."""
-        return requests.post(
-            self.GROQ_API_URL,
-            json={
-                "model": model,
-                "messages": messages,
-                "max_tokens": 1000
-            },
-            headers={
-                "Authorization": f"Bearer {self.GROQ_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            timeout=30
-        )
 
     def update_entry(self, entry_id: int, result: Dict):
         """Update database entry with new processing result."""
@@ -309,7 +235,7 @@ class ImageProcessorRetry:
             
             try:
                 result = self.process_image(entry['image_path'],entry['pdf_file'])
-                # self.store_in_chroma(result, entry['id'])
+                
                 self.update_entry(entry['id'], result)
                 
                 if result['success_status']:
@@ -354,7 +280,7 @@ def main():
 
     try:
         # Initialize processor and process failed entries
-        processor = ImageProcessorRetry(images_dir, output_dir)
+        processor = ImageProcessorRetry(model="gemini-2.0-flash-exp", images_dir = images_dir, output_dir=output_dir)
         stats = processor.process_failed_entries()
         
         # Print summary
