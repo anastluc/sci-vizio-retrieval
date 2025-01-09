@@ -18,12 +18,9 @@ import numpy as np
 # import chromadb
 # from chromadb.utils import embedding_functions
 from tqdm import tqdm
+
 from vision_models.vision_API import VisionAPI
-from vision_models.claude_vision import ClaudeVision
-from vision_models.gemini_vision import GeminiVision
-from vision_models.groq_vision import GroqVision
-from vision_models.openai_vision import OpenAIVision
-from vision_models.xai_vision import XAI_Vision
+from vision_models.factory import create_vision_api
 
 MLLM_Provider = Literal[
     "openai",
@@ -41,7 +38,7 @@ class ImageProcessorRetry:
         Args:
             db_path (str): Path to SQLite database
         """
-        self.vision_api: VisionAPI = self.create_vision_api(model)
+        self.vision_api: VisionAPI = create_vision_api(model)
 
         self.images_dir = Path(images_dir)
         self.output_dir = Path(output_dir)
@@ -64,19 +61,7 @@ class ImageProcessorRetry:
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def create_vision_api(self,specific_model:str) -> VisionAPI:
-        if specific_model == "openai":
-            return OpenAIVision(specific_model)
-        elif specific_model == "anthropic":
-            return ClaudeVision(specific_model)
-        elif specific_model in ["gemini-2.0-flash-exp"]:
-            return GeminiVision(specific_model)
-        elif specific_model == "groq-vision":
-            return GroqVision(specific_model)
-        elif specific_model == "xai":
-            return XAI_Vision(specific_model)
-        else:
-            raise ValueError(f"Unsupported provider: {specific_model}")
+    
         
     def get_failed_entries(self) -> List[Dict]:
         """

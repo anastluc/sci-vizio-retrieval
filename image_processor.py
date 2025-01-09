@@ -16,12 +16,15 @@ from torchvision import transforms
 from torchvision.models import resnet50, ResNet50_Weights
 import numpy as np
 
+from vision_models.vision_API import VisionAPI
+from vision_models.factory import create_vision_api
+
 class ImageProcessor:
     load_dotenv()
     GROQ_API_URL = os.getenv("GROQ_API_URL")
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     
-    def __init__(self, images_dir: str, output_dir: str, db_path: str = "pdf_processing.db"):
+    def __init__(self, model:str, images_dir: str, output_dir: str, db_path: str = "pdf_processing.db"):
         """
         Initialize the image processor.
         
@@ -30,12 +33,7 @@ class ImageProcessor:
             output_dir (str): Directory to store processing results
             db_path (str): Path to SQLite database
         """
-        load_dotenv()
-        GROQ_API_URL = os.getenv("GROQ_API_URL")
-        GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-        print(GROQ_API_KEY)
-        self.GROQ_API_URL = GROQ_API_URL
-        self.GROQ_API_KEY = GROQ_API_KEY
+        self.vision_api: VisionAPI = create_vision_api(model)
 
         self.images_dir = Path(images_dir)
         self.output_dir = Path(output_dir)
@@ -288,7 +286,7 @@ def main():
     
     try:
         # Initialize processor and process all images
-        processor = ImageProcessor(images_dir, output_dir)
+        processor = ImageProcessor(model="gemini-2.0-flash-exp", images_dir=images_dir, output_dir=output_dir)
         stats = processor.process_directory()
         
         # Print summary
