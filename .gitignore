@@ -5,3 +5,7 @@ output_BKP
 .venv
 .gradio
 chroma_db
+logs
+*.db
+
+BKPs
