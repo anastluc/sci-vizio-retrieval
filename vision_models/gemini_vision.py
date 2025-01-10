@@ -13,9 +13,7 @@ class GeminiVision(VisionAPI):
         self.API_TIME_DELAY = 5
     
         
-
     def analyze_image(self, image_path: str, prompt: str) -> str:
-
         max_retries: int = 3
         initial_delay: float = 1.0
 
@@ -27,7 +25,7 @@ class GeminiVision(VisionAPI):
             "temperature": 1,
             "top_p": 0.95,
             "top_k": 40,
-            "max_output_tokens": 50,
+            "max_output_tokens": 8192,
             "response_mime_type": "text/plain",
         }
 
@@ -36,47 +34,48 @@ class GeminiVision(VisionAPI):
             generation_config=generation_config,
         )
 
-        try:
-            for attempt in range(max_retries):
-                try:
-                    files = [
-                        self.upload_to_gemini(image_path),
-                        ]
-                    
-                    chat_session = model.start_chat(
+        response = None
+        last_exception = None
+
+        for attempt in range(max_retries):
+            print(f"Attempt {attempt + 1} of {max_retries}")
+            try:
+                files = [self.upload_to_gemini(image_path)]
+                # print(files[0])
+                
+                chat_session = model.start_chat(
                     history=[
                         {
-                        "role": "user",
-                        "parts": [
-                            files[0],
-                        ],
+                            "role": "user",
+                            "parts": [files[0]],
                         },
                     ]
-                    )
+                )
 
-                    response = chat_session.send_message(prompt)
-                except Exception as e:
-                    if attempt == max_retries - 1:  # Last attempt
-                        raise Exception(f"Failed after {max_retries} attempts: {str(e)}")
-                    
-                    # Calculate delay with exponential backoff
+                response = chat_session.send_message(prompt)
+                # If we get here without an exception, we have a successful response
+                return response
+
+            except Exception as e:
+                last_exception = e
+                if attempt < max_retries - 1:  # Not the last attempt
                     delay = initial_delay * (2 ** attempt)
                     print(f"Attempt {attempt + 1} failed. Retrying in {delay} seconds...")
                     time.sleep(delay)
-        
-        except Exception as e:
-            print(f"Error occurred: {str(e)}")
-            raise
+                continue
 
-        print(response)
-        # return response.text
+        # If we get here, all attempts failed
+        if last_exception:
+            print(f"Error occurred after {max_retries} attempts: {str(last_exception)}")
+            raise last_exception
+
         return response
-    
+
     def upload_to_gemini(self, path):
         """Uploads the given file to Gemini.
 
         See https://ai.google.dev/gemini-api/docs/prompting_with_media
         """
-        file = genai.upload_file(path)
+        file = genai.upload_file(path, mime_type="image/png")
         print(f"Uploaded file '{file.display_name}' as: {file.uri}")
-        return file.uri
+        return file

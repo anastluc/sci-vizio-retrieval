@@ -18,11 +18,13 @@ import numpy as np
 
 from vision_models.vision_API import VisionAPI
 from vision_models.factory import create_vision_api
+import re
 
+def sanitize_filename(filename: str) -> str:
+    """Convert filename to filesystem-friendly version"""
+    # Replace invalid characters with underscore
+    return re.sub(r'[<>:"/\\|?*]', '_', filename)
 class ImageProcessor:
-    load_dotenv()
-    GROQ_API_URL = os.getenv("GROQ_API_URL")
-    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     
     def __init__(self, model:str, images_dir: str, output_dir: str, db_path: str = "pdf_processing.db"):
         """
@@ -131,42 +133,36 @@ class ImageProcessor:
             'embedding': None
         }
         
+        print(f"Processing image: {image_path} of PDF: {pdf_file}")
+
         try:
             # Generate embedding
             embedding = self.get_image_embedding(image_path)
             if embedding is not None:
-                result['embedding'] = embedding.tolist()
+                result['embedding'] = embedding.tobytes()
 
-            # Read and encode image
-            with open(image_path, 'rb') as img:
-                image_bytes = img.read()
-                encoded = base64.b64encode(image_bytes).decode('utf-8')
+            try:
+                response = self.vision_api.analyze_image(image_path, self.USER_PROMPT)
+                status = 200
+            except Exception as e:
+                print(f"Failed to get response: {str(e)}")
+                status = 500
 
-                # Validate image format
-                img = Image.open(io.BytesIO(image_bytes))
-                img.verify()
-
-            # Prepare API request
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}},
-                        {"type": "text", "text": self.USER_PROMPT}            
-                    ]
-                }
-            ]
-
-            # Make API request
-            response = self.make_api_request("llama-3.2-90b-vision-preview", messages)
-
-            result["response_status_code"] = response.status_code
+            result["response_status_code"] = status
+            print(response.text)
             
-            if response.status_code == 200:
-                content = response.json()["choices"][0]["message"]["content"]
+            if status == 200:
+                content = response.text#json()
                 
+                # # Save response to file
+                # output_file = self.output_dir / f"{image_path.stem}_analysis.json"
+                pdf_subdir = sanitize_filename(pdf_file)
+                output_subdir = self.output_dir / pdf_subdir
+                output_subdir.mkdir(exist_ok=True)
+
                 # Save response to file
-                output_file = self.output_dir / f"{image_path.stem}_analysis.json"
+                output_file = output_subdir / f"{image_path.stem}_analysis.json"
+                
                 with open(output_file, 'w', encoding='utf-8') as f:
                     f.write(content)
                 
@@ -202,6 +198,8 @@ class ImageProcessor:
             },
             timeout=30
         )
+    
+    
 
     def store_result(self, result: Dict):
         """Store processing result in database."""
