@@ -43,6 +43,7 @@ class GeminiVision(VisionAPI):
                 files = [self.upload_to_gemini(image_path)]
                 # print(files[0])
                 
+                
                 chat_session = model.start_chat(
                     history=[
                         {

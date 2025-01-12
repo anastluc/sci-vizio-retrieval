@@ -110,6 +110,42 @@ class ImageProcessor:
             self.logger.error(f"Error generating embedding for {image_path}: {str(e)}")
             return None
 
+    def _check_image_processed(self, image_path: str, pdf_file: str) -> Optional[Dict]:
+        """
+        Check if image has already been processed by looking up in the database.
+        
+        Args:
+            image_path (str): Path to the image file
+            pdf_file (str): Name of the PDF file the image came from
+            
+        Returns:
+            Optional[Dict]: Previous processing result if found, None otherwise
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.cursor()
+            cur.execute('''
+                SELECT pdf_file, timestamp, image, image_path, success_status, 
+                       response_status_code, response, error_message, embedding
+                FROM image_processing
+                WHERE image_path = ? AND pdf_file = ?
+            ''', (str(image_path), pdf_file))
+            
+            row = cur.fetchone()
+            
+            if row:
+                return {
+                    'pdf_file': row[0],
+                    'timestamp': row[1],
+                    'image': row[2],
+                    'image_path': row[3],
+                    'success_status': row[4],
+                    'response_status_code': row[5],
+                    'response': row[6],
+                    'error_message': row[7],
+                    'embedding': row[8]
+                }
+            return None
+    
     def process_image(self, image_path: Path, pdf_file: str) -> Dict:
         """
         Process a single image using the Groq API.
@@ -121,6 +157,27 @@ class ImageProcessor:
         Returns:
             dict: Processing results
         """
+
+        # Check if image has already been processed
+        cached_result = self._check_image_processed(str(image_path), pdf_file)
+        if cached_result:
+            self.logger.info(f"Using cached result for {image_path}")
+            
+            # If the result was successful, ensure the output file exists
+            if cached_result['success_status']:
+                pdf_subdir = sanitize_filename(pdf_file)
+                output_subdir = self.output_dir / pdf_subdir
+                output_subdir.mkdir(exist_ok=True)
+                output_file = output_subdir / f"{image_path.stem}_analysis.json"
+                
+                # Recreate the output file if it doesn't exist
+                if not output_file.exists() and cached_result['response']:
+                    with open(output_file, 'w', encoding='utf-8') as f:
+                        f.write(cached_result['response'])
+            
+            return cached_result
+    
+
         result = {
             'pdf_file': pdf_file,
             'timestamp': datetime.now().isoformat(),
@@ -227,7 +284,8 @@ class ImageProcessor:
         stats = {
             'total_images': 0,
             'successful': 0,
-            'failed': 0
+            'failed': 0,
+            'cached': 0
         }
         
         # Walk through all subdirectories in extracted_images
@@ -245,7 +303,9 @@ class ImageProcessor:
                 
                 try:
                     result = self.process_image(img_path, pdf_name)
-                    if result['success_status']:
+                    if '_check_image_processed' in str(result.get('timestamp', '')):
+                        stats['cached'] += 1
+                    elif result['success_status']:
                         stats['successful'] += 1
                     else:
                         stats['failed'] += 1
@@ -292,6 +352,7 @@ def main():
         print(f"Total images processed: {stats['total_images']}")
         print(f"Successfully processed: {stats['successful']}")
         print(f"Failed to process: {stats['failed']}")
+        print(f"Cached results: {stats.get('cached', 0)}")
         
     except Exception as e:
         print(f"\nAn error occurred: {str(e)}")
