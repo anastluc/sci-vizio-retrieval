@@ -22,21 +22,45 @@ def sanitize_filename(filename: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', '_', filename)
 class ImageProcessor:
     
-    def __init__(self, model: str, images_dir: str, output_dir: str, db_path: str = "pdf_processing.db"):
+    def __init__(self, model: str = None, images_dir: str = None, output_dir: str = None, db_path: str = None):
         """
         Initialize the image processor.
 
         Args:
-            model (str): OpenRouter model slug (e.g. "google/gemini-2.0-flash-001")
-            images_dir (str): Directory containing extracted images
-            output_dir (str): Directory to store processing results
-            db_path (str): Path to SQLite database
+            model (str): OpenRouter model slug (e.g. "google/gemini-2.0-flash-001"). If None, loaded from config.ini.
+            images_dir (str): Directory containing extracted images. If None, loaded from config.ini.
+            output_dir (str): Directory to store processing results. If None, loaded from config.ini.
+            db_path (str): Path to SQLite database. If None, loaded from config.ini.
         """
-        self.vision_api = OpenRouterVision(model=model)
+        import configparser
+        config = configparser.ConfigParser()
+        config_file = Path("config.ini")
+        
+        # Default fallback values
+        config_model = None
+        config_images_dir = "output/extracted_images"
+        config_output_dir = "output/image_process"
+        config_db_path = "pdf_processing.db"
+        
+        if config_file.exists():
+            config.read(config_file)
+            config_model = config.get("vision", "model", fallback=config_model)
+            
+            # Read pipeline config
+            pipeline_output = config.get("pipeline", "output_dir", fallback="output")
+            pipeline_images = config.get("pipeline", "images_subdir", fallback="extracted_images")
+            pipeline_analysis = config.get("pipeline", "analysis_subdir", fallback="image_process")
+            
+            config_images_dir = str(Path(pipeline_output) / pipeline_images)
+            config_output_dir = str(Path(pipeline_output) / pipeline_analysis)
+            config_db_path = config.get("pipeline", "db_path", fallback=config_db_path)
 
-        self.images_dir = Path(images_dir)
-        self.output_dir = Path(output_dir)
-        self.db_path = db_path
+        resolved_model = model if model is not None else config_model
+        self.vision_api = OpenRouterVision(model=resolved_model)
+
+        self.images_dir = Path(images_dir if images_dir is not None else config_images_dir)
+        self.output_dir = Path(output_dir if output_dir is not None else config_output_dir)
+        self.db_path = db_path if db_path is not None else config_db_path
 
         # Initialize image model
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -313,18 +337,40 @@ class ImageProcessor:
     """
 
 def main():
-    # Get directory paths
-    images_dir = input("Enter the directory containing extracted images (or press Enter for 'output/extracted_images'): ").strip() \
-        or "output/extracted_images"
-    output_dir = input("Enter the output directory for analysis (or press Enter for 'output/image_process'): ").strip() \
-        or "output/image_process"
+    # Load config defaults to show as prompts
+    import configparser
+    config = configparser.ConfigParser()
+    config_file = Path("config.ini")
     
-    print(f"\nProcessing images from: {images_dir}")
-    print(f"Saving analysis to: {output_dir}")
+    default_images_dir = "output/extracted_images"
+    default_output_dir = "output/image_process"
+    default_model = "qwen/qwen3.5-flash-02-23"
+    
+    if config_file.exists():
+        config.read(config_file)
+        default_model = config.get("vision", "model", fallback=default_model)
+        pipeline_output = config.get("pipeline", "output_dir", fallback="output")
+        pipeline_images = config.get("pipeline", "images_subdir", fallback="extracted_images")
+        pipeline_analysis = config.get("pipeline", "analysis_subdir", fallback="image_process")
+        
+        default_images_dir = str(Path(pipeline_output) / pipeline_images)
+        default_output_dir = str(Path(pipeline_output) / pipeline_analysis)
+
+    # Get directory paths
+    images_dir = input(f"Enter the directory containing extracted images (or press Enter for '{default_images_dir}'): ").strip() or None
+    output_dir = input(f"Enter the output directory for analysis (or press Enter for '{default_output_dir}'): ").strip() or None
+    
+    # Resolve display names for logging
+    display_images_dir = images_dir or default_images_dir
+    display_output_dir = output_dir or default_output_dir
+    
+    print(f"\nUsing Vision Model: {default_model}")
+    print(f"Processing images from: {display_images_dir}")
+    print(f"Saving analysis to: {display_output_dir}")
     
     try:
         # Initialize processor and process all images
-        processor = ImageProcessor(model="google/gemini-2.0-flash-001", images_dir=images_dir, output_dir=output_dir)
+        processor = ImageProcessor(model=None, images_dir=images_dir, output_dir=output_dir)
         stats = processor.process_directory()
         
         # Print summary

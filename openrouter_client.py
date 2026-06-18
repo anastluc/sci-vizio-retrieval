@@ -14,11 +14,23 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 from openai import OpenAI
 
+import configparser
+
 logger = logging.getLogger(__name__)
 
-# Default model — can be any OpenRouter vision-capable model slug.
-# Browse available models at https://openrouter.ai/models
-DEFAULT_MODEL = "google/gemini-2.0-flash-001"
+# Load config if exists
+config = configparser.ConfigParser()
+config_file = Path("config.ini")
+
+if config_file.exists():
+    config.read(config_file)
+    DEFAULT_MODEL = config.get("vision", "model", fallback="qwen/qwen3.5-flash-02-23")
+    DEFAULT_API_DELAY = config.getfloat("vision", "api_delay", fallback=2.0)
+    DEFAULT_MAX_RETRIES = config.getint("vision", "max_retries", fallback=3)
+else:
+    DEFAULT_MODEL = "qwen/qwen3.5-flash-02-23"
+    DEFAULT_API_DELAY = 2.0
+    DEFAULT_MAX_RETRIES = 3
 
 
 @dataclass
@@ -32,17 +44,16 @@ class OpenRouterVision:
     Vision LLM client that uses OpenRouter as a unified gateway.
 
     Args:
-        model: OpenRouter model identifier (e.g. "google/gemini-2.0-flash-001",
-               "openai/gpt-4o", "anthropic/claude-sonnet-4").
-        api_delay: Seconds to wait between API calls to avoid rate limits.
-        max_retries: Number of retry attempts on transient failures.
+        model: OpenRouter model identifier. If None, resolves from config.ini/DEFAULT_MODEL.
+        api_delay: Seconds to wait between API calls. If None, resolves from config.ini/DEFAULT_API_DELAY.
+        max_retries: Number of retry attempts. If None, resolves from config.ini/DEFAULT_MAX_RETRIES.
     """
 
     def __init__(
         self,
-        model: str = DEFAULT_MODEL,
-        api_delay: float = 2.0,
-        max_retries: int = 3,
+        model: str = None,
+        api_delay: float = None,
+        max_retries: int = None,
     ):
         load_dotenv()
         api_key = os.getenv("OPENROUTER_API_KEY")
@@ -56,9 +67,9 @@ class OpenRouterVision:
             base_url="https://openrouter.ai/api/v1",
             api_key=api_key,
         )
-        self.model = model
-        self.api_delay = api_delay
-        self.max_retries = max_retries
+        self.model = model if model is not None else DEFAULT_MODEL
+        self.api_delay = api_delay if api_delay is not None else DEFAULT_API_DELAY
+        self.max_retries = max_retries if max_retries is not None else DEFAULT_MAX_RETRIES
 
     @staticmethod
     def _encode_image(image_path: str | Path) -> str:

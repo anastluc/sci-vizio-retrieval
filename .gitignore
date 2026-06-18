@@ -33,3 +33,8 @@ build/
 # IDE / OS
 .vscode/
 .DS_Store
+
+pdfs_test
+output_test
+
+pdf_processing.db
