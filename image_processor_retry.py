@@ -1,7 +1,3 @@
-import base64
-import requests
-import io
-from PIL import Image
 import os
 from pathlib import Path
 import sqlite3
@@ -9,36 +5,24 @@ from datetime import datetime
 import json
 import logging
 import time
-from typing import Dict, Literal, Optional, List
-from dotenv import load_dotenv
-import os
-import torch
-# from chromadb.utils.embedding_functions import OpenCLIPEmbeddingFunction
-import numpy as np
-# import chromadb
-# from chromadb.utils import embedding_functions
+from typing import Dict, Optional, List
 from tqdm import tqdm
 
-from vision_models.vision_API import VisionAPI
-from vision_models.factory import create_vision_api
-
-MLLM_Provider = Literal[
-    "openai",
-    "anthropic", 
-    "google", 
-    "groq-vision",
-    "xai"]
+from openrouter_client import OpenRouterVision
 
 class ImageProcessorRetry:
     
-    def __init__(self,  model:str , images_dir: str, output_dir: str, db_path: str = "pdf_processing.db"):
+    def __init__(self, model: str, images_dir: str, output_dir: str, db_path: str = "pdf_processing.db"):
         """
         Initialize the image processor for retrying failed entries.
-        
+
         Args:
+            model (str): OpenRouter model slug (e.g. "google/gemini-2.0-flash-001")
+            images_dir (str): Directory containing extracted images
+            output_dir (str): Directory to store processing results
             db_path (str): Path to SQLite database
         """
-        self.vision_api: VisionAPI = create_vision_api(model)
+        self.vision_api = OpenRouterVision(model=model)
 
         self.images_dir = Path(images_dir)
         self.output_dir = Path(output_dir)
@@ -84,21 +68,16 @@ class ImageProcessorRetry:
             return [dict(row) for row in cur.fetchall()]
 
 
-    def get_image_embedding(self, image_path):
-        
-        img = Image.open(image_path)
-        img_array = np.array(img)
-        
-        emb = self.embedding_function(img_array)
-        return emb
 
-    def process_image(self, image_path: str,pdf_file: str) -> Dict:
+
+    def process_image(self, image_path: str, pdf_file: str) -> Dict:
         """
-        Process a single image using the Groq API.
-        
+        Process a single image using the Vision API.
+
         Args:
             image_path (str): Path to the image file
-            
+            pdf_file (str): Name of the source PDF
+
         Returns:
             dict: Processing results
         """
@@ -113,57 +92,33 @@ class ImageProcessorRetry:
             'error_message': None,
             'embedding': None
         }
-        
+
         try:
             image_path = Path(image_path)
             if not image_path.exists():
                 raise FileNotFoundError(f"Image file not found: {image_path}")
-            
-            # Generate embedding
-            # print(image_path)
-            # embedding = self.get_image_embedding(image_path)
-            embedding = None # do not calculate embedding
-            # print("\n\n---------\n- EMBEDDING -\n---------")
-            # print(embedding)
-            # print("---------")
-            
-                
 
-            # Read and encode image
-            with open(image_path, 'rb') as img:
-                image_bytes = img.read()
-                encoded = base64.b64encode(image_bytes).decode('utf-8')
-
-                # Validate image format
-                img = Image.open(io.BytesIO(image_bytes))
-                img.verify()
-
+            response = None
             try:
                 response = self.vision_api.analyze_image(image_path, self.USER_PROMPT)
             except Exception as e:
-                print(f"Failed to get response: {str(e)}")
+                self.logger.error(f"Failed to get response: {str(e)}")
+                result['error_message'] = f"Vision API call failed: {str(e)}"
 
-
-            # result["response_status_code"] = response.status_code
-            print(response.text)
-
-            if response.status_code == 200:
-                content = response.json()["choices"][0]["message"]["content"]
+            if response is not None:
+                content = response.text
                 result['success_status'] = True
                 result['response'] = content
-
-            if embedding is not None:
-                result['embedding'] = embedding#.tolist()
-                # print(result['embedding'])
-                
-            
+                result['response_status_code'] = 200
             else:
-                result['error_message'] = f"API request failed with status {response.status_code}"
-                
+                result['response_status_code'] = 500
+                if not result['error_message']:
+                    result['error_message'] = "No response received from Vision API"
+
         except Exception as e:
             result['error_message'] = str(e)
             self.logger.error(f"Error processing {image_path}: {str(e)}")
-        
+
         return result
 
     def update_entry(self, entry_id: int, result: Dict):
@@ -265,7 +220,7 @@ def main():
 
     try:
         # Initialize processor and process failed entries
-        processor = ImageProcessorRetry(model="gemini-2.0-flash-exp", images_dir = images_dir, output_dir=output_dir)
+        processor = ImageProcessorRetry(model="google/gemini-2.0-flash-001", images_dir=images_dir, output_dir=output_dir)
         stats = processor.process_failed_entries()
         
         # Print summary

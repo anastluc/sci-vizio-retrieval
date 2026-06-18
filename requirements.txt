@@ -1,9 +1,21 @@
-numpy==1.24.3
-Pillow==10.0.0
-chromadb==0.4.22
-requests==2.31.0
-PyMuPDF==1.23.8
-sentence-transformers
-onnxruntime==1.15.1
-torch==2.0.1
-transformers==4.33.2
+# Core pipeline
+PyMuPDF>=1.23.0
+Pillow>=10.0.0
+numpy>=1.24.0
+chromadb>=0.4.22
+open-clip-torch
+
+# OpenRouter (uses OpenAI SDK with custom base_url)
+openai
+requests>=2.31.0
+
+# ML / embeddings
+torch>=2.0.0
+torchvision
+
+# Utilities
+python-dotenv
+tqdm
+
+# UI
+gradio

@@ -1,6 +1,3 @@
-import base64
-import requests
-import io
 from PIL import Image
 import os
 from pathlib import Path
@@ -9,6 +6,7 @@ from datetime import datetime
 import json
 import logging
 import time
+import re
 from typing import Dict, Optional
 from dotenv import load_dotenv
 import torch
@@ -16,9 +14,7 @@ from torchvision import transforms
 from torchvision.models import resnet50, ResNet50_Weights
 import numpy as np
 
-from vision_models.vision_API import VisionAPI
-from vision_models.factory import create_vision_api
-import re
+from openrouter_client import OpenRouterVision
 
 def sanitize_filename(filename: str) -> str:
     """Convert filename to filesystem-friendly version"""
@@ -26,16 +22,17 @@ def sanitize_filename(filename: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', '_', filename)
 class ImageProcessor:
     
-    def __init__(self, model:str, images_dir: str, output_dir: str, db_path: str = "pdf_processing.db"):
+    def __init__(self, model: str, images_dir: str, output_dir: str, db_path: str = "pdf_processing.db"):
         """
         Initialize the image processor.
-        
+
         Args:
+            model (str): OpenRouter model slug (e.g. "google/gemini-2.0-flash-001")
             images_dir (str): Directory containing extracted images
             output_dir (str): Directory to store processing results
             db_path (str): Path to SQLite database
         """
-        self.vision_api: VisionAPI = create_vision_api(model)
+        self.vision_api = OpenRouterVision(model=model)
 
         self.images_dir = Path(images_dir)
         self.output_dir = Path(output_dir)
@@ -148,7 +145,7 @@ class ImageProcessor:
     
     def process_image(self, image_path: Path, pdf_file: str) -> Dict:
         """
-        Process a single image using the Groq API.
+        Process a single image using the OpenRouter Vision API.
         
         Args:
             image_path (Path): Path to the image file
@@ -198,64 +195,46 @@ class ImageProcessor:
             if embedding is not None:
                 result['embedding'] = embedding.tobytes()
 
+            response = None
             try:
                 response = self.vision_api.analyze_image(image_path, self.USER_PROMPT)
                 status = 200
             except Exception as e:
-                print(f"Failed to get response: {str(e)}")
+                self.logger.error(f"Failed to get response: {str(e)}")
                 status = 500
+                result['error_message'] = f"Vision API call failed: {str(e)}"
 
             result["response_status_code"] = status
-            print(response.text)
-            
-            if status == 200:
-                content = response.text#json()
-                
-                # # Save response to file
-                # output_file = self.output_dir / f"{image_path.stem}_analysis.json"
+
+            if status == 200 and response is not None:
+                content = response.text
+
                 pdf_subdir = sanitize_filename(pdf_file)
                 output_subdir = self.output_dir / pdf_subdir
                 output_subdir.mkdir(exist_ok=True)
 
                 # Save response to file
                 output_file = output_subdir / f"{image_path.stem}_analysis.json"
-                
+
                 with open(output_file, 'w', encoding='utf-8') as f:
                     f.write(content)
-                
+
                 result['success_status'] = True
                 result['response'] = content
-                
-            else:
-                result['error_message'] = f"API request failed with status {response.status_code}"
-                
+
+            elif status != 200:
+                result['error_message'] = f"API request failed with status {status}"
+
         except Exception as e:
             result['error_message'] = str(e)
             self.logger.error(f"Error processing {image_path}: {str(e)}")
-        
-        
-        
+
         # Store result in database
         self.store_result(result)
         
         return result
 
-    def make_api_request(self, model: str, messages: list) -> requests.Response:
-        """Make request to Groq API."""
-        return requests.post(
-            self.GROQ_API_URL,
-            json={
-                "model": model,
-                "messages": messages,
-                "max_tokens": 1000
-            },
-            headers={
-                "Authorization": f"Bearer {self.GROQ_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            timeout=30
-        )
-    
+
     
 
     def store_result(self, result: Dict):
@@ -302,8 +281,9 @@ class ImageProcessor:
                 self.logger.info(f"Processing image {stats['total_images']}: {img_path.name}")
                 
                 try:
+                    cached = self._check_image_processed(str(img_path), pdf_name)
                     result = self.process_image(img_path, pdf_name)
-                    if '_check_image_processed' in str(result.get('timestamp', '')):
+                    if cached is not None:
                         stats['cached'] += 1
                     elif result['success_status']:
                         stats['successful'] += 1
@@ -344,7 +324,7 @@ def main():
     
     try:
         # Initialize processor and process all images
-        processor = ImageProcessor(model="gemini-2.0-flash-exp", images_dir=images_dir, output_dir=output_dir)
+        processor = ImageProcessor(model="google/gemini-2.0-flash-001", images_dir=images_dir, output_dir=output_dir)
         stats = processor.process_directory()
         
         # Print summary

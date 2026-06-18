@@ -196,7 +196,6 @@ class ImageAnalysisIndexer:
             return False
 
     def process_all_analyses(self):
-        print("2")
         """Process all image analyses from the database."""
         stats = {
             'total_processed': 0,
@@ -219,7 +218,6 @@ class ImageAnalysisIndexer:
             ''')
             
             for pdf_file, image_path, response in cur.fetchall():
-                print("3")
                 stats['total_processed'] += 1
                 self.logger.info(f"Processing [{stats['total_processed']}] {image_path}")
                 
@@ -255,7 +253,6 @@ class ImageAnalysisIndexer:
         return stats
 
 def main():
-    print("1")
     try:
         # Initialize indexer and process all analyses
         indexer = ImageAnalysisIndexer()

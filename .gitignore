@@ -1,20 +1,35 @@
+# Environment & secrets
 .env
-pdfs
-pdfs_medium
-output
-output_BKP
-.venv
-.gradio
-chroma_db
-logs
 
-BKPs
+# Data directories
+pdfs/
+pdfs_small/
+pdfs_medium/
+output/
+output_BKP/
+chroma_db/
+logs/
+test_data/
+notebooks/
+BKPs/
 
+# Databases
 *.db
 
+# Python
+__pycache__/
 **/__pycache__/
 **/*.pyc
 **/*.pyo
 **/*.pyd
+*.egg-info/
+dist/
+build/
+.venv/
 
-.vscode
+# Gradio
+.gradio/
+
+# IDE / OS
+.vscode/
+.DS_Store

@@ -1,12 +1,9 @@
 import gradio as gr
 import chromadb
 from chromadb.utils import embedding_functions
-import base64
 import json
 from PIL import Image
 import io
-from pathlib import Path
-import os
 
 class ChromaDBQuerier:
     def __init__(self, chroma_path="./chroma_db"):
@@ -138,4 +135,4 @@ with gr.Blocks(css="footer {visibility: hidden}") as demo:
     )
 
 if __name__ == "__main__":
-    demo.launch(share=True)
+    demo.launch(share=False)
