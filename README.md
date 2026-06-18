@@ -6,12 +6,15 @@ A scientific paper image analysis and semantic search pipeline. Extract images f
 
 ## Overview
 
-**Sci-Vizio-Retrieval** automates the process of extracting, understanding, and retrieving visual content from scientific literature. It combines:
+**Sci-Vizio-Retrieval** automates the process of extracting, understanding, and retrieving visual content from scientific literature. It features:
 
-- **PDF image extraction** using PyMuPDF
-- **Vision LLM analysis** via [OpenRouter](https://openrouter.ai) — access 200+ models (Gemini, GPT-4o, Claude, Llama, etc.) through a single API key
-- **Vector indexing** via ChromaDB for semantic search
-- **Gradio web UI** for interactive natural language search
+- **PDF image extraction** using PyMuPDF.
+- **Vision LLM analysis** via [OpenRouter](https://openrouter.ai) — access 200+ models (Gemini, GPT-4o, Claude, Llama, etc.) through a single API key.
+- **Vector indexing** via ChromaDB for semantic search.
+- **Gradio web UI** for interactive natural language search.
+- **Robust configuration system** supporting both `config.ini` and environment variable overrides.
+
+---
 
 ## Architecture
 
@@ -21,70 +24,46 @@ A scientific paper image analysis and semantic search pipeline. Extract images f
 │  (pdfs/)     │     │  (PyMuPDF)        │     │  LLM API   │     │  Indexer   │
 └─────────────┘     └──────────────────┘     └───────────┘     └────────────┘
                             │                       │                  │
-                     output/extracted_images   output/image_process    │
-                                                                       │
-                                                              ┌────────▼────────┐
-                                                              │   Gradio Web UI  │
-                                                              │  (Semantic Search)│
-                                                              └─────────────────┘
+                      output/extracted_images   output/image_process    │
+                                                                        │
+                                                               ┌────────▼────────┐
+                                                               │   Gradio Web UI  │
+                                                               │  (Semantic Search)│
+                                                               └─────────────────┘
 ```
 
-## Pipeline Steps
+---
 
-### Step 1 — Extract images from PDFs
+## Configuration (`config.ini` & Environment Variables)
 
-```bash
-python pdf_image_extractor.py
-```
+The pipeline is controlled by a central `config.ini` file. If this file is missing, the application automatically generates a default template on the first run.
 
-Reads all PDFs from an input directory, extracts embedded images (per page), and saves them as individual files. Also extracts raw text. Tracks processing in SQLite to avoid re-processing, and detects duplicate PDFs via SHA-256 hashing.
+### Configuration Options
 
-### Step 2 — Analyse images with a Vision LLM
+| Section | Key | Default | Description |
+|---------|-----|---------|-------------|
+| `[vision]` | `model` | `qwen/qwen3.5-flash-02-23` | OpenRouter model identifier slug |
+| `[vision]` | `api_delay` | `2.0` | Seconds to wait between API calls to avoid rate limits |
+| `[vision]` | `max_retries` | `3` | Retry attempts on transient API failures |
+| `[vision]` | `max_tokens` | `2048` | Maximum output token size |
+| `[pipeline]` | `pdf_input_dir` | `pdfs` | Input directory containing research papers |
+| `[pipeline]` | `output_dir` | `output` | Base output directory for pipeline runs |
+| `[pipeline]` | `images_subdir` | `extracted_images` | Subfolder inside output_dir for extracted images |
+| `[pipeline]` | `analysis_subdir`| `image_process` | Subfolder inside output_dir for JSON descriptions |
+| `[pipeline]` | `db_path` | `pdf_processing.db` | Path to SQLite database tracking file state |
+| `[pipeline]` | `chroma_path` | `chroma_db` | Persistent ChromaDB vector database directory |
 
-```bash
-python image_processor.py
-```
+### Environment Overrides
 
-Sends each extracted image to a Vision LLM via OpenRouter (default: `google/gemini-2.0-flash-001`) with a prompt requesting a structured JSON description containing:
+Any configuration option can be overridden using environment variables. The configuration loader checks in the following order:
+1. **Prefixed Environment Variable:** `SCI_{SECTION}_{KEY}` (e.g., `SCI_VISION_MODEL=openai/gpt-4o`)
+2. **Short Environment Variable:** `{KEY}` (e.g., `VISION_MODEL=openai/gpt-4o`)
+3. **INI Value:** Reads from `config.ini`
+4. **Fallback:** Application default values
 
-- `image_type` (diagram, graph, flowchart, etc.)
-- `title`, `description`
-- Optional: `x-axis`, `y-axis`, `time_period`, `sources`, `labels`, `key patterns`
+Additionally, paths specified in configuration are resolved relative to the project root directory, making executions safe from any working directory.
 
-Results are cached in SQLite to avoid redundant API calls.
-
-### Step 2b — Retry failed analyses (optional)
-
-```bash
-python image_processor_retry.py
-```
-
-Re-processes entries that previously failed (e.g., due to rate limiting). Uses the same OpenRouter client.
-
-### Step 3 — Index into ChromaDB
-
-```bash
-python indexer.py
-```
-
-Validates the JSON responses, then indexes both the text descriptions and image embeddings (via OpenCLIP) into two ChromaDB collections:
-
-- `image_analysis_description_documents` — text-based semantic search
-- `image_analysis_image_embeddings` — image-based similarity search
-
-### Step 4 — Search via Gradio UI
-
-```bash
-python gradio_app.py
-```
-
-Launches a web interface at `http://localhost:7860` where you can enter natural language queries to find relevant images and their structured descriptions.
-
-## Prerequisites
-
-- Python 3.10+
-- An [OpenRouter API key](https://openrouter.ai/keys) (one key gives access to all supported models)
-- ~2 GB disk space for ML models (OpenCLIP, ResNet50)
+---
 
 ## Setup
 
@@ -103,51 +82,97 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Configure API keys
+### 3. Configure secrets
+
+Copy the template secrets file:
 
 ```bash
 cp .env-dist .env
 ```
 
-Edit `.env` and add your OpenRouter API key:
+Edit the generated `.env` file and add your OpenRouter API key:
 
 ```
 OPENROUTER_API_KEY=sk-or-v1-xxxxxxxxxxxx
 ```
 
-Get a key at [openrouter.ai/keys](https://openrouter.ai/keys).
+Get an API key at [openrouter.ai/keys](https://openrouter.ai/keys).
 
-### 4. Add PDF files
+### 4. Place PDF files
 
-Place your research paper PDFs in the `pdfs/` directory (created automatically if missing).
+Put your scientific paper PDFs into the input folder (defaults to `pdfs/`, created automatically on run).
 
-### 5. Run the pipeline
+---
+
+## CLI Usage (`main.py`)
+
+The root-level CLI script `main.py` provides commands to run either the entire pipeline at once or execute individual stages.
+
+### Run the overall pipeline in one go
+
+Execute the complete extraction, vision description, and ChromaDB indexing sequential flow:
 
 ```bash
-python pdf_image_extractor.py   # Extract images
-python image_processor.py       # Analyse with Vision LLM
-python indexer.py                # Index into ChromaDB
-python gradio_app.py             # Launch search UI
+python3 main.py run
 ```
+
+*Note: Scoped execution is enabled by default during the `run` command—it will only process images and index metadata corresponding to the PDFs found in the input folder.*
+
+### Run individual pipeline stages
+
+**1. PDF Extraction**
+```bash
+python3 main.py extract --input-dir pdfs/
+```
+Extracts text and embedded images from PDFs to `output/extracted_text/` and `output/extracted_images/`.
+
+**2. Vision LLM Processing**
+```bash
+python3 main.py process --model qwen/qwen3.5-flash-02-23
+```
+Sends extracted images to the vision model and saves JSON descriptions to `output/image_process/`. Add `--retry` to reprocess only failed entries.
+
+**3. Vector Database Indexing**
+```bash
+python3 main.py index
+```
+Validates the JSON results and builds vector indices in ChromaDB (supporting both CLIP-based visual searches and text descriptions).
+
+**4. Start gradu search UI**
+```bash
+python3 main.py serve --port 7860
+```
+Starts the interactive Gradio query web application.
+
+---
 
 ## Project Structure
 
 ```
 sci-vizio-retrieval/
-├── gradio_app.py                 # Gradio web UI for semantic search
-├── pdf_image_extractor.py        # PDF → image extraction (PyMuPDF)
-├── image_processor.py            # Vision LLM image analysis
-├── image_processor_retry.py      # Retry failed analyses
-├── indexer.py                    # ChromaDB indexing
-├── openrouter_client.py          # OpenRouter Vision API client
-├── requirements.txt              # Python dependencies
-├── .env-dist                     # Environment variable template
-├── .gitignore
-└── docs/
-    └── gradio_ui_screenshot.png  # UI screenshot
+├── main.py                       # Unified CLI pipeline entrypoint
+├── config.ini                    # Central pipeline configuration (auto-generated)
+├── requirements.txt              # Project dependencies
+├── .env-dist                     # Template secrets file
+│
+├── sci_vizio_retrieval/          # Core Python Package
+│   ├── __init__.py               # Package exports
+│   ├── config.py                 # Config loader with env overrides & root resolution
+│   ├── client.py                 # OpenRouter API Vision Client
+│   ├── extractor.py              # PDFProcessor class
+│   ├── processor.py              # ImageProcessor and ImageProcessorRetry classes
+│   ├── indexer.py                # ImageAnalysisIndexer class
+│   └── ui.py                     # Gradio app & ChromaDBQuerier
+│
+├── gradio_app.py                 # Backward-compatibility wrapper (UI Search)
+├── pdf_image_extractor.py        # Backward-compatibility wrapper (Extraction)
+├── image_processor.py            # Backward-compatibility wrapper (Vision processing)
+├── image_processor_retry.py      # Backward-compatibility wrapper (Retries)
+├── indexer.py                    # Backward-compatibility wrapper (Indexing)
+└── openrouter_client.py          # Backward-compatibility wrapper (Client API)
 ```
 
-### Data directories (gitignored)
+### Data Directories (gitignored)
 
 | Directory | Purpose |
 |-----------|---------|
@@ -158,16 +183,8 @@ sci-vizio-retrieval/
 | `chroma_db/` | ChromaDB vector database |
 | `logs/` | Processing logs |
 
-## Switching Vision Models
-
-All vision models are accessed via OpenRouter. To switch models, change the `model` parameter in `image_processor.py` to any [OpenRouter model slug](https://openrouter.ai/models):
-
-```python
-processor = ImageProcessor(model="google/gemini-2.0-flash-001", images_dir=..., output_dir=...)
-processor = ImageProcessor(model="openai/gpt-4o", images_dir=..., output_dir=...)
-processor = ImageProcessor(model="anthropic/claude-sonnet-4", images_dir=..., output_dir=...)
-```
+---
 
 ## License
 
-This project is for research purposes.
+This project is for research and educational purposes.
