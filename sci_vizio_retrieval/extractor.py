@@ -1,22 +1,105 @@
-import fitz  # PyMuPDF
-import sqlite3
 import hashlib
+import io
 import json
 import logging
+import sqlite3
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Iterator, List
+
+import pymupdf
 from PIL import Image
 
 from sci_vizio_retrieval.config import (
-    PDF_INPUT_DIR,
-    OUTPUT_DIR,
     DB_PATH,
+    IMAGES_SUBDIR,
+    OUTPUT_DIR,
+    PDF_INPUT_DIR,
 )
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass
+class ExtractedImage:
+    """An image embedded in a PDF page."""
+
+    page: int   # 1-based page number
+    index: int  # 1-based position among the page's images
+    ext: str
+    data: bytes = field(repr=False)
+    width: int
+    height: int
+
+    @property
+    def filename(self) -> str:
+        return f"page{self.page}_img{self.index}.{self.ext}"
+
+
+def optimize_image_bytes(data: bytes) -> bytes:
+    """Re-encode an image compressed, flattening transparency onto white.
+
+    Returns the input unchanged if Pillow can't re-encode it (e.g. JPX, JBIG2).
+    """
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            img.load()
+        fmt = img.format
+        if img.mode in ('RGBA', 'LA'):
+            background = Image.new('RGB', img.size, 'white')
+            background.paste(img, mask=img.getchannel('A'))
+            img = background
+        out = io.BytesIO()
+        img.save(out, format=fmt, optimize=True, quality=85)
+        return out.getvalue()
+    except Exception as e:
+        logger.warning(f"Could not optimize image: {e}")
+        return data
+
+
+def iter_pdf_images(pdf_document, min_side: int = 0, optimize: bool = True) -> Iterator[ExtractedImage]:
+    """
+    Yield the raster images embedded in an open PyMuPDF document.
+
+    Args:
+        pdf_document: An open ``pymupdf.Document``.
+        min_side: Skip images whose width or height is below this many pixels
+            (icons, logos, rule lines).
+        optimize: Re-encode images with :func:`optimize_image_bytes`.
+    """
+    for page_num in range(pdf_document.page_count):
+        page = pdf_document[page_num]
+        for img_index, img_info in enumerate(page.get_images(full=True)):
+            base_image = pdf_document.extract_image(img_info[0])
+            if not base_image:
+                continue
+            width, height = base_image.get("width", 0), base_image.get("height", 0)
+            if min(width, height) < min_side:
+                continue
+            data = base_image["image"]
+            yield ExtractedImage(
+                page=page_num + 1,
+                index=img_index + 1,
+                ext=base_image["ext"],
+                data=optimize_image_bytes(data) if optimize else data,
+                width=width,
+                height=height,
+            )
+
+
+def extract_pdf_images(pdf: bytes | str | Path, min_side: int = 0, optimize: bool = True) -> List[ExtractedImage]:
+    """Extract the raster images from a PDF given as a path or in-memory bytes."""
+    if isinstance(pdf, (bytes, bytearray)):
+        document = pymupdf.open(stream=bytes(pdf), filetype="pdf")
+    else:
+        document = pymupdf.open(str(pdf))
+    with document:
+        return list(iter_pdf_images(document, min_side=min_side, optimize=optimize))
+
+
 class PDFProcessor:
-    def __init__(self, input_dir=None, output_dir=None, db_path=None):
+    def __init__(self, input_dir=None, output_dir=None, db_path=None, delete_duplicates=False):
         """
         Initialize the PDF processor with directories and database connection.
         
@@ -24,12 +107,15 @@ class PDFProcessor:
             input_dir (str/Path): Directory containing PDF files
             output_dir (str/Path): Base directory for extracted content
             db_path (str): Path to SQLite database
+            delete_duplicates (bool): Delete input PDFs whose content duplicates
+                an already-processed PDF. Duplicates are always skipped.
         """
         self.input_dir = Path(input_dir or PDF_INPUT_DIR)
         self.output_dir = Path(output_dir or OUTPUT_DIR)
-        self.images_dir = self.output_dir / "extracted_images"
+        self.images_dir = self.output_dir / IMAGES_SUBDIR
         self.text_dir = self.output_dir / "extracted_text"
         self.db_path = db_path or DB_PATH
+        self.delete_duplicates = delete_duplicates
         
         # Create necessary directories
         self.images_dir.mkdir(parents=True, exist_ok=True)
@@ -110,7 +196,7 @@ class PDFProcessor:
 
     def handle_duplicate(self, pdf_path, original_path):
         """
-        Handle duplicate PDF by recording it in database and optionally deleting it.
+        Record a duplicate PDF in the database and, if enabled, delete it.
         
         Args:
             pdf_path (Path): Path to the duplicate PDF
@@ -128,8 +214,10 @@ class PDFProcessor:
                 (str(pdf_path), datetime.now().isoformat(), original_path)
             )
             conn.commit()
-        
-        # Delete the duplicate file
+
+        if not self.delete_duplicates:
+            return
+
         try:
             pdf_path.unlink()
             logger.info(f"Deleted duplicate file: {pdf_path}")
@@ -180,26 +268,28 @@ class PDFProcessor:
             tuple: (success, output_path or error_message)
         """
         try:
-            pdf_document = fitz.open(str(pdf_path))
             text_content = []
-            
-            for page_num in range(pdf_document.page_count):
-                page = pdf_document[page_num]
-                text_content.append(f"--- Page {page_num + 1} ---\n")
-                text_content.append(page.get_text())
-                text_content.append("\n\n")
+            with pymupdf.open(str(pdf_path)) as pdf_document:
+                for page_num in range(pdf_document.page_count):
+                    page = pdf_document[page_num]
+                    text_content.append(f"--- Page {page_num + 1} ---\n")
+                    text_content.append(page.get_text())
+                    text_content.append("\n\n")
             
             relative_path = pdf_path.stem
             output_path = self.text_dir / f"{relative_path}.txt"
             output_path.parent.mkdir(parents=True, exist_ok=True)
             
             output_path.write_text('\n'.join(text_content), encoding='utf-8')
-            
-            pdf_document.close()
             return True, output_path
             
         except Exception as e:
             return False, str(e)
+
+    @staticmethod
+    def _optimize_image(image_path):
+        """Re-save an extracted image compressed, flattening transparency onto white."""
+        image_path.write_bytes(optimize_image_bytes(image_path.read_bytes()))
 
     def extract_images(self, pdf_path):
         """
@@ -216,37 +306,15 @@ class PDFProcessor:
             pdf_output_dir = self.images_dir / relative_path
             pdf_output_dir.mkdir(parents=True, exist_ok=True)
             
-            pdf_document = fitz.open(str(pdf_path))
             extracted_images = []
-            
-            for page_num in range(pdf_document.page_count):
-                page = pdf_document[page_num]
-                image_list = page.get_images(full=True)
-                
-                for img_index, img_info in enumerate(image_list):
-                    xref = img_info[0]
-                    base_image = pdf_document.extract_image(xref)
-                    
-                    if base_image:
-                        image_filename = f"page{page_num + 1}_img{img_index + 1}.{base_image['ext']}"
-                        image_path = pdf_output_dir / image_filename
-                        
-                        image_path.write_bytes(base_image["image"])
-                        
-                        try:
-                            with Image.open(image_path) as img:
-                                if img.mode == 'RGBA':
-                                    img = img.convert('RGB')
-                                img.save(image_path, optimize=True, quality=85)
-                        except Exception as e:
-                            logger.warning(f"Could not optimize {image_filename}: {str(e)}")
-                        
-                        extracted_images.append({
-                            'filename': image_filename,
-                            'path': str(image_path.relative_to(self.output_dir))
-                        })
-            
-            pdf_document.close()
+            for image in extract_pdf_images(pdf_path):
+                image_path = pdf_output_dir / image.filename
+                image_path.write_bytes(image.data)
+                extracted_images.append({
+                    'filename': image.filename,
+                    'path': str(image_path.relative_to(self.output_dir))
+                })
+
             return True, extracted_images
             
         except Exception as e:
@@ -318,7 +386,8 @@ class PDFProcessor:
             if images_success:
                 results['image_info'] = images_result
             else:
-                results['error_message'] = f"{results['error_message']}; Image extraction failed: {images_result}"
+                image_error = f"Image extraction failed: {images_result}"
+                results['error_message'] = "; ".join(filter(None, [results['error_message'], image_error]))
             
             with sqlite3.connect(self.db_path) as conn:
                 cur = conn.cursor()

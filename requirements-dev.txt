@@ -1,0 +1,7 @@
+-r requirements.txt
+-r requirements-saas.txt
+pytest>=8
+pytest-cov
+ruff
+httpx
+moto[s3]>=5

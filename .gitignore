@@ -38,3 +38,16 @@ pdfs_test
 output_test
 
 pdf_processing.db
+# Test / coverage artefacts
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+
+# Web app
+var/
+frontend/node_modules/
+frontend/dist/
+.firebase/
+firebase-debug.log
+*-debug.log

@@ -1,0 +1,12 @@
+# Heroku container deploy: `heroku stack:set container`, then `git push heroku main`.
+build:
+  docker:
+    web: Dockerfile
+    worker: Dockerfile
+release:
+  image: web
+  command:
+    - alembic -c sci_vizio_saas/alembic.ini upgrade head
+run:
+  web: uvicorn sci_vizio_saas.main:create_app --factory --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'
+  worker: python -m sci_vizio_saas.worker

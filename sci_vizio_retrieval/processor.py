@@ -1,25 +1,20 @@
-import os
-import time
-import sqlite3
-import json
 import logging
+import os
 import re
+import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, List
-from tqdm import tqdm
-from PIL import Image
+from typing import Dict, List, Optional
+
 import numpy as np
-import torch
-from torchvision import transforms
-from torchvision.models import resnet50, ResNet50_Weights
+from PIL import Image
+from tqdm import tqdm
 
 from sci_vizio_retrieval.client import OpenRouterVision
 from sci_vizio_retrieval.config import (
-    VISION_MODEL,
     DB_PATH,
-    get_images_dir,
     get_analysis_dir,
+    get_images_dir,
 )
 
 logger = logging.getLogger(__name__)
@@ -27,6 +22,15 @@ logger = logging.getLogger(__name__)
 def sanitize_filename(filename: str) -> str:
     """Convert filename to filesystem-friendly version"""
     return re.sub(r'[<>:"/\\|?*]', '_', filename)
+
+
+def write_analysis(output_dir: Path, pdf_file: str, image_path: Path, content: str) -> Path:
+    """Write a vision-LLM response to ``<output_dir>/<pdf>/<image>_analysis.json``."""
+    output_subdir = output_dir / sanitize_filename(pdf_file)
+    output_subdir.mkdir(parents=True, exist_ok=True)
+    output_file = output_subdir / f"{image_path.stem}_analysis.json"
+    output_file.write_text(content, encoding='utf-8')
+    return output_file
 
 
 class ImageProcessor:
@@ -43,7 +47,8 @@ class ImageProcessor:
     Do NOT suffix with any extra text, finish with the json object, i.e. the last character should be }
     """
 
-    def __init__(self, model: str = None, images_dir: str = None, output_dir: str = None, db_path: str = None):
+    def __init__(self, model: str = None, images_dir: str = None, output_dir: str = None, db_path: str = None,
+                 vision_client: OpenRouterVision = None, embed_images: bool = True):
         """
         Initialize the image processor.
 
@@ -52,27 +57,19 @@ class ImageProcessor:
             images_dir (str): Directory containing extracted images. If None, loaded from config.ini.
             output_dir (str): Directory to store processing results. If None, loaded from config.ini.
             db_path (str): Path to SQLite database. If None, loaded from config.ini.
+            vision_client: Object with an ``analyze_image(path, prompt)`` method. Defaults to OpenRouterVision.
+            embed_images (bool): Store a ResNet-50 embedding per image (requires torch/torchvision).
         """
         self.images_dir = Path(images_dir if images_dir is not None else get_images_dir())
         self.output_dir = Path(output_dir if output_dir is not None else get_analysis_dir())
         self.db_path = db_path or DB_PATH
 
-        self.vision_api = OpenRouterVision(model=model)
+        self.vision_api = vision_client or OpenRouterVision(model=model)
 
-        # Initialize image embedding model
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = resnet50(weights=ResNet50_Weights.DEFAULT)
-        self.model = torch.nn.Sequential(*(list(self.model.children())[:-1]))
-        self.model.to(self.device)
-        self.model.eval()
-        
-        self.transform = transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-        
+        # The embedding model is loaded on first use
+        self.embed_images = embed_images
+        self._embedding_model = None
+
         # Initialize database
         self._init_database()
         
@@ -99,16 +96,42 @@ class ImageProcessor:
             ''')
             conn.commit()
 
+    def _load_embedding_model(self):
+        """Load ResNet-50 (without its classification head) and its preprocessing."""
+        import torch
+        from torchvision import transforms
+        from torchvision.models import ResNet50_Weights, resnet50
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = resnet50(weights=ResNet50_Weights.DEFAULT)
+        model = torch.nn.Sequential(*(list(model.children())[:-1]))
+        model.to(device)
+        model.eval()
+
+        transform = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        return model, transform, device
+
     def get_image_embedding(self, image_path: str | Path) -> Optional[np.ndarray]:
         """Generate embedding for an image."""
         try:
+            import torch
+
+            if self._embedding_model is None:
+                self._embedding_model = self._load_embedding_model()
+            model, transform, device = self._embedding_model
+
             image = Image.open(image_path).convert('RGB')
-            image_tensor = self.transform(image).unsqueeze(0).to(self.device)
-            
+            image_tensor = transform(image).unsqueeze(0).to(device)
+
             with torch.no_grad():
-                embedding = self.model(image_tensor)
+                embedding = model(image_tensor)
                 embedding = embedding.squeeze().cpu().numpy()
-                
+
             return embedding / np.linalg.norm(embedding)
             
         except Exception as e:
@@ -147,15 +170,10 @@ class ImageProcessor:
         if cached_result:
             logger.info(f"Using cached result for {image_path}")
             
-            if cached_result['success_status']:
-                pdf_subdir = sanitize_filename(pdf_file)
-                output_subdir = self.output_dir / pdf_subdir
-                output_subdir.mkdir(exist_ok=True)
-                output_file = output_subdir / f"{image_path.stem}_analysis.json"
-                
-                if not output_file.exists() and cached_result['response']:
-                    with open(output_file, 'w', encoding='utf-8') as f:
-                        f.write(cached_result['response'])
+            if cached_result['success_status'] and cached_result['response']:
+                output_file = self.output_dir / sanitize_filename(pdf_file) / f"{image_path.stem}_analysis.json"
+                if not output_file.exists():
+                    write_analysis(self.output_dir, pdf_file, image_path, cached_result['response'])
             
             return cached_result
     
@@ -174,10 +192,10 @@ class ImageProcessor:
         logger.info(f"Processing image: {image_path} of PDF: {pdf_file}")
 
         try:
-            # Generate embedding
-            embedding = self.get_image_embedding(image_path)
-            if embedding is not None:
-                result['embedding'] = embedding.tobytes()
+            if self.embed_images:
+                embedding = self.get_image_embedding(image_path)
+                if embedding is not None:
+                    result['embedding'] = embedding.tobytes()
 
             response = None
             try:
@@ -192,17 +210,11 @@ class ImageProcessor:
 
             if status == 200 and response is not None:
                 content = response.text
-                pdf_subdir = sanitize_filename(pdf_file)
-                output_subdir = self.output_dir / pdf_subdir
-                output_subdir.mkdir(exist_ok=True)
-
-                output_file = output_subdir / f"{image_path.stem}_analysis.json"
-                with open(output_file, 'w', encoding='utf-8') as f:
-                    f.write(content)
+                write_analysis(self.output_dir, pdf_file, image_path, content)
 
                 result['success_status'] = True
                 result['response'] = content
-            elif status != 200:
+            elif not result['error_message']:
                 result['error_message'] = f"API request failed with status {status}"
 
         except Exception as e:
@@ -273,9 +285,7 @@ class ImageProcessor:
                             stats['successful'] += 1
                         else:
                             stats['failed'] += 1
-                        # Add delay to avoid API rate limits
-                        time.sleep(1)
-                    
+
                 except Exception as e:
                     stats['failed'] += 1
                     logger.error(f"Failed to process {img_path}: {str(e)}")
@@ -286,13 +296,14 @@ class ImageProcessor:
 class ImageProcessorRetry:
     USER_PROMPT = ImageProcessor.USER_PROMPT
 
-    def __init__(self, model: str = None, images_dir: str = None, output_dir: str = None, db_path: str = None):
+    def __init__(self, model: str = None, images_dir: str = None, output_dir: str = None, db_path: str = None,
+                 vision_client: OpenRouterVision = None):
         """Initialize the image processor for retrying failed entries."""
         self.images_dir = Path(images_dir if images_dir is not None else get_images_dir())
         self.output_dir = Path(output_dir if output_dir is not None else get_analysis_dir())
-        self.db_path = db_path or DB_PATH       
-        
-        self.vision_api = OpenRouterVision(model=model)
+        self.db_path = db_path or DB_PATH
+
+        self.vision_api = vision_client or OpenRouterVision(model=model)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def get_failed_entries(self) -> List[Dict]:
@@ -339,14 +350,7 @@ class ImageProcessorRetry:
                 result['success_status'] = True
                 result['response'] = content
                 result['response_status_code'] = 200
-                
-                # Write to disk
-                pdf_subdir = sanitize_filename(pdf_file)
-                output_subdir = self.output_dir / pdf_subdir
-                output_subdir.mkdir(exist_ok=True)
-                output_file = output_subdir / f"{img_path.stem}_analysis.json"
-                with open(output_file, 'w', encoding='utf-8') as f:
-                    f.write(content)
+                write_analysis(self.output_dir, pdf_file, img_path, content)
             else:
                 result['response_status_code'] = 500
                 if not result['error_message']:
@@ -424,10 +428,7 @@ class ImageProcessorRetry:
                 else:
                     stats['failed'] += 1
                     logger.error(f"Failed to process {entry['image_path']}: {result['error_message']}")
-                
-                # Add delay to avoid API rate limits
-                time.sleep(5)
-                
+
             except Exception as e:
                 stats['failed'] += 1
                 logger.error(f"Error processing {entry['image_path']}: {str(e)}")

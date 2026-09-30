@@ -1,133 +1,114 @@
-import sqlite3
 import json
-import chromadb
-from chromadb.utils import embedding_functions
 import logging
-from typing import Dict, Optional, Tuple, List
+import sqlite3
 from datetime import datetime
 from pathlib import Path
-import base64
-import numpy as np
-from PIL import Image
+from typing import Dict, List, Optional, Tuple
 
-from sci_vizio_retrieval.config import (
-    DB_PATH,
-    CHROMA_PATH,
-)
+from sci_vizio_retrieval.config import CHROMA_PATH, DB_PATH
+from sci_vizio_retrieval.stores import IndexRecord, VectorStore, create_vector_store
+from sci_vizio_retrieval.stores.chroma import chroma_store_name
 
 logger = logging.getLogger(__name__)
 
+REQUIRED_FIELDS = ("image_type", "title", "description")
+
+
+def extract_and_validate_json(response_text: Optional[str]) -> Tuple[bool, Optional[Dict], Optional[str]]:
+    """
+    Extract the outermost JSON object from a vision-LLM response and validate it.
+
+    Returns:
+        (success, parsed_object, error_message)
+    """
+    if not response_text:
+        return False, None, "Empty response"
+
+    try:
+        start_idx = response_text.find('{')
+        end_idx = response_text.rfind('}')
+
+        if start_idx == -1 or end_idx == -1:
+            return False, None, "No JSON object found in response"
+
+        json_obj = json.loads(response_text[start_idx:end_idx + 1])
+
+        missing_fields = [f for f in REQUIRED_FIELDS if f not in json_obj]
+        if missing_fields:
+            return False, None, f"Missing required fields: {', '.join(missing_fields)}"
+
+        return True, json_obj, None
+
+    except json.JSONDecodeError as e:
+        return False, None, f"JSON parsing error: {str(e)}"
+
+
 class ImageAnalysisIndexer:
-    def __init__(self, db_path: str = None, chroma_path: str = None):
+    def __init__(self, db_path: str = None, chroma_path: str = None, vector_store: VectorStore = None):
         """
         Initialize the indexer.
-        
+
         Args:
-            db_path (str): Path to SQLite database
-            chroma_path (str): Path to ChromaDB persistent storage
+            db_path (str): Path to SQLite database holding pipeline state
+            chroma_path (str): ChromaDB path, used only when no vector_store is given
+                and the configured backend is chroma
+            vector_store (VectorStore): Destination store. Defaults to the backend
+                configured in config.ini.
         """
         self.db_path = db_path or DB_PATH
-        self.chroma_path = chroma_path or CHROMA_PATH
-        
-        # chroma settings
-        self.chroma_client = chromadb.PersistentClient(path=self.chroma_path)
-        self.embedding_function = embedding_functions.OpenCLIPEmbeddingFunction()
-        
-        # Initialize database
+        self.store = vector_store or create_vector_store(chroma_path=chroma_path)
         self._init_database()
-        
-        # Initialize or get collections
-        self._init_collections()
 
     def _init_database(self):
-        """Initialize SQLite database with indexing tracking table."""
+        """Create the per-store indexing tracking table, migrating legacy rows once."""
         with sqlite3.connect(self.db_path) as conn:
             cur = conn.cursor()
             cur.execute('''
-                CREATE TABLE IF NOT EXISTS json_indexing (
+                CREATE TABLE IF NOT EXISTS vector_indexing (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    store TEXT NOT NULL,
                     pdf_file TEXT,
                     image_path TEXT,
                     index_status BOOLEAN,
                     timestamp TEXT,
                     error_message TEXT,
-                    UNIQUE(pdf_file, image_path)
+                    UNIQUE(store, pdf_file, image_path)
                 )
             ''')
+
+            # Earlier versions tracked Chroma indexing (at the default path) in
+            # `json_indexing`; carry that over so existing indexes aren't rebuilt.
+            legacy_exists = cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'json_indexing'"
+            ).fetchone()
+            store_has_rows = cur.execute(
+                "SELECT 1 FROM vector_indexing WHERE store = ? LIMIT 1", (self.store.name,)
+            ).fetchone()
+            if legacy_exists and not store_has_rows and self.store.name == chroma_store_name(CHROMA_PATH):
+                cur.execute('''
+                    INSERT OR IGNORE INTO vector_indexing
+                    (store, pdf_file, image_path, index_status, timestamp, error_message)
+                    SELECT ?, pdf_file, image_path, index_status, timestamp, error_message
+                    FROM json_indexing
+                ''', (self.store.name,))
+                logger.info(f"Migrated {cur.rowcount} legacy indexing records to {self.store.name}")
             conn.commit()
 
-    def _init_collections(self):
-        """Initialize or get ChromaDB collections."""
-        try:
-            self.image_collection = self.chroma_client.create_collection(
-                name="image_analysis_image_embeddings",
-                metadata={"description": "Image analysis results with image embeddings"},
-                embedding_function=self.embedding_function
-            )
-            logger.info("Created new collection: image_analysis_image_embeddings")
-        except Exception:
-            logger.info("Collection exists, getting existing collection: image_analysis_image_embeddings")
-            self.image_collection = self.chroma_client.get_collection(
-                name="image_analysis_image_embeddings",
-                embedding_function=self.embedding_function
-            )
-        
-        try:
-            self.doc_collection = self.chroma_client.create_collection(
-                name="image_analysis_description_documents",
-                metadata={"description": "Image analysis results with vision analysis documents"},
-            )
-            logger.info("Created new collection: image_analysis_description_documents")
-        except Exception:
-            logger.info("Collection exists, getting existing collection: image_analysis_description_documents")            
-            self.doc_collection = self.chroma_client.get_collection(
-                name="image_analysis_description_documents"
-            )
-
+    # Kept as a method for backwards compatibility.
     def extract_and_validate_json(self, response_text: str) -> Tuple[bool, Optional[Dict], Optional[str]]:
         """Extract and validate JSON from response text."""
-        try:
-            start_idx = response_text.find('{')
-            end_idx = response_text.rfind('}')
-            
-            if start_idx == -1 or end_idx == -1:
-                return False, None, "No JSON object found in response"
-            
-            json_str = response_text[start_idx:end_idx + 1]
-            json_obj = json.loads(json_str)
-            
-            required_fields = ['image_type', 'title', 'description']
-            missing_fields = [field for field in required_fields if field not in json_obj]
-            
-            if missing_fields:
-                return False, None, f"Missing required fields: {', '.join(missing_fields)}"
-            
-            return True, json_obj, None
-            
-        except json.JSONDecodeError as e:
-            return False, None, f"JSON parsing error: {str(e)}"
-        except Exception as e:
-            return False, None, f"Validation error: {str(e)}"
+        return extract_and_validate_json(response_text)
 
-    def get_image_embedding(self, image_path: str) -> Optional[str]:
-        """Get base64 encoded image for embedding/metadata inclusion."""
-        try:
-            with open(image_path, 'rb') as img_file:
-                return base64.b64encode(img_file.read()).decode('utf-8')
-        except Exception as e:
-            logger.error(f"Error encoding image {image_path}: {str(e)}")
-            return None
-
-    def store_indexing_result(self, pdf_file: str, image_path: str, 
-                             success: bool, error_message: Optional[str] = None):
+    def store_indexing_result(self, pdf_file: str, image_path: str,
+                              success: bool, error_message: Optional[str] = None):
         """Store indexing result in database."""
         with sqlite3.connect(self.db_path) as conn:
-            cur = conn.cursor()
-            cur.execute('''
-                INSERT OR REPLACE INTO json_indexing 
-                (pdf_file, image_path, index_status, timestamp, error_message)
-                VALUES (?, ?, ?, ?, ?)
+            conn.execute('''
+                INSERT OR REPLACE INTO vector_indexing
+                (store, pdf_file, image_path, index_status, timestamp, error_message)
+                VALUES (?, ?, ?, ?, ?, ?)
             ''', (
+                self.store.name,
                 pdf_file,
                 image_path,
                 success,
@@ -136,98 +117,87 @@ class ImageAnalysisIndexer:
             ))
             conn.commit()
 
-    def index_document(self, pdf_file: str, image_path: str, 
+    def index_document(self, pdf_file: str, image_path: str,
                        json_obj: Dict, document_id: str) -> bool:
-        """Index document and image in ChromaDB."""
+        """Index one analysed image in the vector store."""
         try:
-            image_b64 = self.get_image_embedding(image_path)
-            if not image_b64:
-                return False
-
-            json_str = json.dumps(json_obj)
-            
-            self.doc_collection.add(
-                documents=[json_str],
-                metadatas=[{
-                    "pdf_file": pdf_file,
-                    "image_path": image_path,
-                    "image_type": json_obj.get("image_type", ""),
-                    "title": json_obj.get("title", ""),
-                    "image_data": image_b64
-                }],
-                ids=[document_id]
-            )
-
-            img = Image.open(image_path)
-            img_array = np.array(img)
-            
-            self.image_collection.add(
-                metadatas=[{
-                    "pdf_file": pdf_file,
-                    "image": image_path,
-                    "image_path": image_path
-                }],
-                images=[img_array],
-                ids=[document_id]
-            )
-            
+            image_bytes = Path(image_path).read_bytes()
+            self.store.upsert(IndexRecord(
+                id=document_id,
+                pdf_file=pdf_file,
+                image_path=image_path,
+                analysis=json_obj,
+                image_bytes=image_bytes,
+            ))
             return True
-            
+
         except Exception as e:
             logger.error(f"Error indexing document {document_id}: {str(e)}")
             return False
 
-    def process_all_analyses(self, pdf_names: List[str] = None) -> Dict:
-        """Process all image analyses from the database."""
+    def process_all_analyses(self, pdf_names: List[str] = None, reindex: bool = False) -> Dict:
+        """
+        Index every successful image analysis not yet indexed in this store.
+
+        Args:
+            pdf_names: Only index images belonging to these PDFs (by stem).
+            reindex: Re-index everything, ignoring previous indexing status.
+        """
         stats = {
             'total_processed': 0,
             'successful_validations': 0,
             'successful_indexing': 0,
             'failed': 0
         }
-        
-        query = '''
-            SELECT ip.pdf_file, ip.image_path, ip.response
-            FROM image_processing ip
-            LEFT JOIN json_indexing ji 
-            ON ip.pdf_file = ji.pdf_file AND ip.image_path = ji.image_path
-            WHERE ip.success_status = TRUE 
-            AND (ji.index_status IS NULL OR ji.index_status = FALSE)
-        '''
-        params = []
-        if pdf_names is not None:
-            placeholders = ', '.join(['?'] * len(pdf_names))
-            query += f" AND ip.pdf_file IN ({placeholders})"
-            params.extend(pdf_names)
-            
+
         with sqlite3.connect(self.db_path) as conn:
             cur = conn.cursor()
-            cur.execute(query, params)
-            
-            for pdf_file, image_path, response in cur.fetchall():
-                stats['total_processed'] += 1
-                logger.info(f"Processing [{stats['total_processed']}] {image_path}")
-                
-                success, json_obj, error_message = self.extract_and_validate_json(response)
-                
-                if success:
-                    stats['successful_validations'] += 1
-                    document_id = f"{pdf_file}_{Path(image_path).stem}"
-                    
-                    if self.index_document(pdf_file, image_path, json_obj, document_id):
-                        stats['successful_indexing'] += 1
-                        self.store_indexing_result(pdf_file, image_path, True)
-                    else:
-                        stats['failed'] += 1
-                        self.store_indexing_result(
-                            pdf_file, image_path, False, 
-                            "Failed to index in ChromaDB"
-                        )
+            has_analyses = cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'image_processing'"
+            ).fetchone()
+            if not has_analyses:
+                logger.warning("No image analyses found; run the 'process' stage first.")
+                return stats
+
+            query = '''
+                SELECT ip.pdf_file, ip.image_path, ip.response
+                FROM image_processing ip
+                LEFT JOIN vector_indexing vi
+                ON vi.store = ? AND ip.pdf_file = vi.pdf_file AND ip.image_path = vi.image_path
+                WHERE ip.success_status = TRUE
+            '''
+            params = [self.store.name]
+            if not reindex:
+                query += " AND (vi.index_status IS NULL OR vi.index_status = FALSE)"
+            if pdf_names is not None:
+                placeholders = ', '.join(['?'] * len(pdf_names))
+                query += f" AND ip.pdf_file IN ({placeholders})"
+                params.extend(pdf_names)
+
+            rows = cur.execute(query, params).fetchall()
+
+        logger.info(f"Indexing {len(rows)} analyses into {self.store.name}")
+        for pdf_file, image_path, response in rows:
+            stats['total_processed'] += 1
+            logger.info(f"Processing [{stats['total_processed']}] {image_path}")
+
+            success, json_obj, error_message = extract_and_validate_json(response)
+
+            if success:
+                stats['successful_validations'] += 1
+                document_id = f"{pdf_file}_{Path(image_path).stem}"
+
+                if self.index_document(pdf_file, image_path, json_obj, document_id):
+                    stats['successful_indexing'] += 1
+                    self.store_indexing_result(pdf_file, image_path, True)
                 else:
                     stats['failed'] += 1
                     self.store_indexing_result(
-                        pdf_file, image_path, False, 
-                        error_message
+                        pdf_file, image_path, False,
+                        f"Failed to index in {self.store.backend}"
                     )
-        
+            else:
+                stats['failed'] += 1
+                self.store_indexing_result(pdf_file, image_path, False, error_message)
+
         return stats

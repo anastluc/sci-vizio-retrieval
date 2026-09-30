@@ -1,0 +1,23 @@
+# Local PostgreSQL with the pgvector extension for the `postgres` storage backend.
+#   docker compose up -d
+#   export SCI_STORAGE_BACKEND=postgres
+#   export SCI_STORAGE_POSTGRES_DSN=postgresql://sci:sci@localhost:5432/sci_vizio
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: sci
+      POSTGRES_PASSWORD: sci
+      POSTGRES_DB: sci_vizio
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sci -d sci_vizio"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

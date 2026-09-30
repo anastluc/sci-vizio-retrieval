@@ -1,21 +1,28 @@
+# Full runtime install (all backends + UI). For a lighter install use extras,
+# e.g. `pip install -e ".[postgres,ui]"` — see pyproject.toml.
+
 # Core pipeline
-PyMuPDF>=1.23.0
+PyMuPDF>=1.24.3
 Pillow>=10.0.0
 numpy>=1.24.0
-chromadb>=0.4.22
-open-clip-torch
+tqdm
+python-dotenv
 
 # OpenRouter (uses OpenAI SDK with custom base_url)
-openai
-requests>=2.31.0
+openai>=1.0
 
-# ML / embeddings
+# ML / image embeddings
 torch>=2.0.0
 torchvision
 
-# Utilities
-python-dotenv
-tqdm
+# Vector store: ChromaDB (default)
+chromadb>=0.5
+open-clip-torch
+
+# Vector store: PostgreSQL + pgvector
+psycopg[binary]>=3.1
+pgvector>=0.3
+sentence-transformers>=2.7
 
 # UI
-gradio
+gradio>=4.0

@@ -26,7 +26,7 @@ def main():
         print(f"Total PDFs found: {stats['total_pdfs']}")
         print(f"Successfully processed: {stats['processed_pdfs']}")
         print(f"Skipped (already processed): {stats['skipped_pdfs']}")
-        print(f"Duplicates found and removed: {stats['duplicate_pdfs']}")
+        print(f"Duplicates found (skipped): {stats['duplicate_pdfs']}")
         print(f"Failed to process: {stats['failed_pdfs']}")
         print(f"Total images extracted: {stats['total_images']}")
         print(f"Total text files created: {stats['total_text_files']}")
